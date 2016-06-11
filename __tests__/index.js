@@ -485,12 +485,74 @@ describe('markdown-to-jsx', () => {
     });
 
     describe('arbitrary HTML', () => {
-        it('should preserve the HTML given', () => {
-            const element = render(converter('<dd>Hello</dd>'));
-            const elementNode = ReactDOM.findDOMNode(element);
+        it('should convert the HTML into the proper JSX object', () => {
+            const object = converter('<dd>Hello</dd>');
 
-            expect(elementNode.children[0].tagName).toBe('DIV');
-            expect(elementNode.children[0].children[0].tagName).toBe('DD');
+            expect(object.type).toBe('dd');
+            expect(object.children[0]).toBe('Hello');
+        });
+
+        it('should convert children with markdown markup into the proper JSX objects', () => {
+            const object = converter('<dd>*Hello*</dd>');
+
+            expect(object.type).toBe('dd');
+            expect(object.children[0].type).toBe('em');
+            expect(object.children[0].children[0]).toBe('Hello');
+        });
+
+        it('should convert custom HTML tags into JSX objects', () => {
+            const object = converter('<test-object>Hello</test-object>');
+
+            expect(object.type).toBe('test-object');
+            expect(object.children[0]).toBe('Hello');
+        });
+
+        it('should convert HTML attributes to JSX props', () => {
+            const object = converter('<dd class="foo">Hello</dd>');
+
+            expect(object.type).toBe('dd');
+            expect(object.props.className).toBe('foo');
+            expect(object.children[0]).toBe('Hello');
+        });
+
+        it('should convert boolean HTML attributes to JSX props', () => {
+            const object = converter('<dd disabled class="foo">Hello</dd>');
+
+            expect(object.type).toBe('dd');
+            expect(object.props.className).toBe('foo');
+            expect(object.props.disabled).toBe(true);
+            expect(object.children[0]).toBe('Hello');
+        });
+
+        it('should convert nested HTML to JSX objects', () => {
+            const object = converter('<dd><dt>Hello</dt><dl>There</dl></dd>');
+
+            expect(object.type).toBe('dd');
+            expect(object.children[0].type).toBe('dt');
+            expect(object.children[0].children[0]).toBe('Hello');
+            expect(object.children[1].type).toBe('dl');
+            expect(object.children[1].children[0]).toBe('There');
+        });
+
+        it('should convert the HTML into the proper JSX object, respecting overrides', () => {
+            class MyComponent extends React.Component {
+                render() {
+                    return <div>{this.props.children}</div>;
+                }
+            }
+
+            const object = converter('<dd>Hello</dd>', {}, {
+                dd: {
+                    component: MyComponent,
+                    props: {
+                        className: 'foo'
+                    }
+                }
+            });
+
+            expect(object.type).toBe(MyComponent);
+            expect(object.props.className).toBe('foo');
+            expect(object.children[0]).toBe('Hello');
         });
     });
 

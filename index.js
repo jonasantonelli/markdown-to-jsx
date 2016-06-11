@@ -1,8 +1,18 @@
 import React from 'react';
+import {DOMAttributeNames} from 'react/lib/HTMLDOMPropertyConfig.js';
 import {parse} from 'remark';
 
+import inverter from 'lodash.invert';
+import camelcaser from 'lodash.camelcase';
+import compactor from 'lodash.compact';
+
+// now we can do O(1) lookups for swapping class -> className, etc.
+const attributeToJSXPropMap = inverter(DOMAttributeNames);
+
 const getType = Object.prototype.toString;
-const textTypes = ['text', 'textNode'];
+const tag_regex = /(?:)[A-Za-z-]+/;
+
+const TEXT_NODE_TYPE = 'text';
 
 export default function markdownToJSX(markdown, options = {}, overrides = {}) {
     let definitions;
@@ -24,9 +34,6 @@ export default function markdownToJSX(markdown, options = {}, overrides = {}) {
 
         case 'heading':
             return `h${node.depth}`;
-
-        case 'html':
-            return 'div';
 
         case 'image':
         case 'imageReference':
@@ -149,8 +156,82 @@ export default function markdownToJSX(markdown, options = {}, overrides = {}) {
         return root;
     }
 
-    function astToJSX(ast, index) { /* `this` is the dictionary of definitions */
-        if (textTypes.indexOf(ast.type) !== -1) {
+    function extractAttributeKVPairs(str) {
+        // progressively scan the string; we can't use a regex here because they can't handle
+        // mixed quote situations
+
+        const pairs = {};
+        let remainder = str;
+        let idx;
+        let subject;
+        let predicate;
+        let separator;
+
+        while (remainder.length) {
+            // scan until we hit a space, an equal sign, or the end
+            for (let i = 0, len = remainder.length; i < len; i += 1) {
+                if (i + 1 === len) {
+                    // reached the end, this must be a boolean attribute
+                    pairs[remainder] = true;
+                    remainder = '';
+
+                    return;
+
+                } else if (remainder[i] === '=') {
+                    subject = remainder.slice(0, i);
+
+                    if (remainder[i + 1] === '"') {
+                        // double-quoted value, grab up to the next double quote
+                        predicate = remainder.slice(i + 2, remainder.indexOf('"', i + 2));
+
+                    } else if (remainder[i + 1] === '\'') {
+                        // single-quoted value, grab up to the next single quote
+                        predicate = remainder.slice(i + 2, remainder.indexOf('\'', i + 2));
+
+                    } else {
+                        // naked value, just grab up to the next space or end
+                        idx = remainder.indexOf(' ');
+                        predicate = idx === -1 ? remainder.slice(i + 1) : remainder.slice(i + 1, idx);
+                    }
+
+                    pairs[subject] = predicate;
+                    remainder = remainder.slice(subject.length + predicate.length + 1).trim();
+
+                    return;
+                }
+            }
+        }
+
+        return pairs;
+    }
+
+    function attributeMapToJSXProps(mapping) {
+        return Object.keys(mapping).reduce((map, key) => {
+            if (key === 'style') {
+                map[key] = mapping[key]
+                            .split(/;\s?/)
+                            .map(str => str.split(/:\s?/))
+                            .reduce((map, style) => {
+                                map[camelcaser(style[0])] = style[1];
+
+                                return map;
+
+                            }, {});
+            } else {
+                map[attributeToJSXPropMap[key] || key] = mapping[key];
+            }
+
+            return map;
+
+        }, {});
+    }
+
+    function astToJSX(ast, index, array) { /* `this` is the dictionary of definitions */
+        if (ast._IGNORE) {
+            return null;
+        }
+
+        if (ast.type === TEXT_NODE_TYPE) {
             return ast.value;
         }
 
@@ -179,12 +260,6 @@ export default function markdownToJSX(markdown, options = {}, overrides = {}) {
                 );
             } /* gfm task list, need to add a checkbox */
         }
-
-        if (ast.type === 'html') {
-            return (
-                <div key={key} dangerouslySetInnerHTML={{__html: ast.value}} />
-            );
-        } /* arbitrary HTML, do the gross thing for now */
 
         if (ast.type === 'table') {
             const tbody = {type: 'tbody', children: []};
@@ -239,12 +314,46 @@ export default function markdownToJSX(markdown, options = {}, overrides = {}) {
             ast.children = [{type: 'sup', value: ast.identifier}];
         } /* place the identifier inside a superscript tag for the link */
 
-        let htmlNodeType = getHTMLNodeTypeFromASTNodeType(ast);
+        let htmlNodeType;
+        let props = {key};
+
+        if (ast.type === 'html') {
+            // remark has two behaviors when it comes to HTML
+            // 1. it will break apart non-block elements and process the insides
+            // 2. if any block-level elements at all are included, the whole HTML string is left
+            //    unprocessed
+
+            const html = ast.value;
+            let end_node;
+
+            for (let i = array.length - 1; i > 0; i -= 1) {
+                if (array[i].type === 'html') {
+                    end_node = array[i];
+                    break;
+                }
+            }
+
+            ast.children = array.slice(index, array.indexOf(end_node)).map(node => {
+                // skip these nodes in the future loop iterations, since they're already handled
+                node._IGNORE = true;
+
+                return astToJSX(node);
+            });
+
+            htmlNodeType = html.match(tag_regex)[0];
+
+            const attribute_pairs = extractAttributeKVPairs(
+                html.slice(html.indexOf(htmlNodeType) + 1, html.length - 2)
+            ); // omit space after tag name and end character (>)
+
+            props = {...attributeMapToJSXProps(attribute_pairs)};
+
+        } /* arbitrary HTML: find the matching end tag, then recursively process the interim children */
+
+        htmlNodeType = htmlNodeType || getHTMLNodeTypeFromASTNodeType(ast);
         if (htmlNodeType === null) {
             return null;
         } /* bail out, not convertable to any HTML representation */
-
-        let props = {key};
 
         const override = overrides[htmlNodeType];
         if (override) {
@@ -266,13 +375,13 @@ export default function markdownToJSX(markdown, options = {}, overrides = {}) {
         const finalProps = formExtraPropsForHTMLNodeType(props, ast);
 
         if (ast.children && ast.children.length === 1) {
-            if (textTypes.indexOf(ast.children[0].type) !== -1) {
+            if (ast.children[0].type === TEXT_NODE_TYPE) {
                 ast.children = ast.children[0].value;
             }
         } /* solitary text children don't need full parsing or React will add a wrapper */
 
         const children =   Array.isArray(ast.children)
-                         ? ast.children.map(astToJSX)
+                         ? compactor(ast.children.map(astToJSX))
                          : ast.children;
 
         return React.createElement(htmlNodeType, finalProps, ast.value || children);
